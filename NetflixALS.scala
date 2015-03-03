@@ -7,6 +7,8 @@ import org.apache.log4j.Level
 import scala.io.Source
 import scala.collection.mutable.Seq
 
+import com.github.nscala_time.time.Imports._
+
 import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
@@ -37,20 +39,66 @@ object NetflixALS {
 
     val movies = readAndParseMovieTitles(movieTitleFile)
     val ratings = loadNetflixRatings(datasetHomeDir, movies, sc)
+    val (training, validation) = getTrainingRatings(ratings)
+    train(training, validation)
 
     sc.stop();
   }
 
+  def train(training: RDD[Rating], validation: RDD[Rating]) = {
+    val numTraining = training.count
+    val numValidation = validation.count
+
+    println("Training: " + numTraining + ", validation: " + numValidation)
+
+    // train models and evaluate them on the validation set
+
+    val ranks = List(8, 12)
+    val lambdas = List(0.1, 10.0)
+    val numIters = List(10, 20)
+    var bestModel: Option[MatrixFactorizationModel] = None
+    var bestValidationRmse = Double.MaxValue
+    var bestRank = 0
+    var bestLambda = -1.0
+    var bestNumIter = -1
+    for (rank <- ranks; lambda <- lambdas; numIter <- numIters) {
+      val model = ALS.train(training, rank, numIter, lambda)
+      val validationRmse = computeRmse(model, validation, numValidation)
+      println("RMSE (validation) = " + validationRmse + " for the model trained with rank = "
+        + rank + ", lambda = " + lambda + ", and numIter = " + numIter + ".")
+      if (validationRmse < bestValidationRmse) {
+        bestModel = Some(model)
+        bestValidationRmse = validationRmse
+        bestRank = rank
+        bestLambda = lambda
+        bestNumIter = numIter
+      }
+    }
+  }
+
+  def getTrainingRatings(ratings: RDD[(Long, Rating)]):
+    (RDD[Rating], RDD[Rating]) = {
+
+    val training = ratings.filter(x => x._1 < 8)
+                          .values
+                          .persist
+    val validation = ratings.filter(x => x._1 >=8)
+                            .values
+                            .persist
+    (training, validation)
+  }
+
   def loadNetflixRatings(dir: String, moviesMap: Map[Int, String], sc: SparkContext) = {
-    var ratingRDD: RDD[(String, Rating)]  = null
+    var ratingRDD: RDD[(Long, Rating)]  = null
     moviesMap.foreach { (kv) =>
       val movieId = kv._1
 
-      val ratings = sc.textFile(f"$dir/mv_$movieId%07d.txt").flatMap[(String, Rating)] { line =>
+      val ratings = sc.textFile(f"$dir/mv_$movieId%07d.txt").flatMap[(Long, Rating)] { line =>
         val fields = line.split(",")
         if (fields.size == 3) { 
           // format: (date, Rating(userId, movieId, rating))
-          Seq((fields(2), Rating(fields(0).toInt, movieId, fields(1).toDouble)))
+          val timestamp = DateTime.parse(fields(2)).getMillis() / 1000
+          Seq((timestamp % 10, Rating(fields(0).toInt, movieId, fields(1).toDouble)))
         } else {
           Seq()
         }
