@@ -5,7 +5,7 @@ import org.apache.log4j.Logger
 import org.apache.log4j.Level
 
 import scala.io.Source
-import scala.collection.mutable.Map
+import scala.collection.mutable.Seq
 
 import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
@@ -27,8 +27,8 @@ object NetflixALS {
 
     // set up environment
 
-    //val conf = new SparkConf().setAppName("NetflixALS")
-    //val sc = new SparkContext(conf)
+    val conf = new SparkConf().setAppName("NetflixALS")
+    val sc = new SparkContext(conf)
 
     // load ratings and movie titles
 
@@ -36,13 +36,37 @@ object NetflixALS {
     val movieTitleFile = args(1)
 
     val movies = readAndParseMovieTitles(movieTitleFile)
+    val ratings = loadNetflixRatings(datasetHomeDir, movies, sc)
 
-    //sc.stop();
+    sc.stop();
   }
 
-  def readAndParseMovieTitles(path: String): Map[Int, String] = {
-    val movieMap = Map[Int, String]() 
- 
+  def loadNetflixRatings(dir: String, moviesMap: Map[Int, String], sc: SparkContext) = {
+    var ratingRDD: RDD[(String, Rating)]  = null
+    moviesMap.foreach { (kv) =>
+      val movieId = kv._1
+
+      val ratings = sc.textFile(f"$dir/mv_$movieId%07d.txt").flatMap[(String, Rating)] { line =>
+        val fields = line.split(",")
+        if (fields.size == 3) { 
+          // format: (date, Rating(userId, movieId, rating))
+          Seq((fields(2), Rating(fields(0).toInt, movieId, fields(1).toDouble)))
+        } else {
+          Seq()
+        }
+      }
+      if (ratingRDD == null) {
+        ratingRDD = ratings
+      } else {
+        ratingRDD = ratingRDD.union(ratings)
+      }        
+    }
+    ratingRDD.persist
+    ratingRDD
+  }
+
+  def readFile(path: String): Seq[String] = {
+    var lines = Seq[String]()
     try {
       val fstream = new FileInputStream(path)
       val in = new DataInputStream(fstream)
@@ -50,8 +74,7 @@ object NetflixALS {
       var line: String = null
       line = br.readLine()
       while (line != null)   {
-        val fields = line.split(",")
-        movieMap += ((fields(0).toInt, fields(2)))
+        lines = lines.+:(line)
         line = br.readLine()
       }
       in.close()
@@ -59,7 +82,14 @@ object NetflixALS {
       case e: Exception =>
         println("Error: " + e.getMessage())
     }
-    movieMap
+    lines
+  } 
+
+  def readAndParseMovieTitles(path: String): Map[Int, String] = {
+    readFile(path).map { (line) =>
+      val fields = line.split(",")
+      (fields(0).toInt, fields(2))
+    }.toMap
   }
 
   /** Compute RMSE (Root Mean Squared Error). */
