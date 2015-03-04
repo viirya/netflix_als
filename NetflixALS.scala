@@ -13,6 +13,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd._
+import org.apache.spark.storage.StorageLevel
 import org.apache.spark.mllib.recommendation.{ALS, Rating, MatrixFactorizationModel}
 
 object NetflixALS {
@@ -22,8 +23,8 @@ object NetflixALS {
     Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
     Logger.getLogger("org.eclipse.jetty.server").setLevel(Level.OFF)	
 
-    if (args.length != 2) {
-      println("Usage: NetflixALS \"datasetHomeDir\" \"path to movie_title.txt\"")
+    if (args.length < 2) {
+      println("Usage: NetflixALS \"datasetHomeDir\" \"path to movie_title.txt\" \"<number of ratings>\"")
       exit(1)
     }
 
@@ -31,14 +32,16 @@ object NetflixALS {
 
     val conf = new SparkConf().setAppName("NetflixALS")
     val sc = new SparkContext(conf)
+    sc.setCheckpointDir("rdd_checkpoint")
 
     // load ratings and movie titles
 
     val datasetHomeDir = args(0)
     val movieTitleFile = args(1)
+    val numRatings = if (args.length == 3) Some(args(2).toInt) else None
 
     val movies = readAndParseMovieTitles(movieTitleFile)
-    val ratings = loadNetflixRatings(datasetHomeDir, movies, sc)
+    val ratings = loadNetflixRatings(datasetHomeDir, movies, sc, numRatings)
     val (training, validation) = getTrainingRatings(ratings)
     train(training, validation)
 
@@ -55,7 +58,7 @@ object NetflixALS {
 
     val ranks = List(8, 12)
     val lambdas = List(0.1, 10.0)
-    val numIters = List(10, 20)
+    val numIters = List(20, 50, 100)
     var bestModel: Option[MatrixFactorizationModel] = None
     var bestValidationRmse = Double.MaxValue
     var bestRank = 0
@@ -79,37 +82,43 @@ object NetflixALS {
   def getTrainingRatings(ratings: RDD[(Long, Rating)]):
     (RDD[Rating], RDD[Rating]) = {
 
-    val training = ratings.filter(x => x._1 < 8)
-                          .values
-                          .persist
-    val validation = ratings.filter(x => x._1 >=8)
-                            .values
-                            .persist
+    val datasets = ratings.randomSplit(Array[Double](0.8, 0.2))
+    val training = datasets(0).values.persist(StorageLevel.DISK_ONLY)
+    val validation = datasets(1).values.persist(StorageLevel.DISK_ONLY)
+    training.checkpoint()
+    validation.checkpoint()
     (training, validation)
   }
 
-  def loadNetflixRatings(dir: String, moviesMap: Map[Int, String], sc: SparkContext) = {
+  def loadNetflixRatings(dir: String, moviesMap: Map[Int, String], sc: SparkContext, numRatings: Option[Int]) = {
+    var i = 0
     var ratingRDD: RDD[(Long, Rating)]  = null
     moviesMap.foreach { (kv) =>
       val movieId = kv._1
 
-      val ratings = sc.textFile(f"$dir/mv_$movieId%07d.txt").flatMap[(Long, Rating)] { line =>
-        val fields = line.split(",")
-        if (fields.size == 3) { 
-          // format: (date, Rating(userId, movieId, rating))
-          val timestamp = DateTime.parse(fields(2)).getMillis() / 1000
-          Seq((timestamp % 10, Rating(fields(0).toInt, movieId, fields(1).toDouble)))
-        } else {
-          Seq()
+      if (numRatings == None || i < numRatings.get) {
+        val ratings = sc.textFile(f"$dir/mv_$movieId%07d.txt").flatMap[(Long, Rating)] { line =>
+          val fields = line.split(",")
+          if (fields.size == 3) { 
+            // format: (date, Rating(userId, movieId, rating))
+            val timestamp = DateTime.parse(fields(2)).getMillis() / 1000
+            Seq((timestamp % 10, Rating(fields(0).toInt, movieId, fields(1).toDouble)))
+          } else {
+            Seq()
+          }
         }
+        if (ratingRDD == null) {
+          ratingRDD = ratings
+        } else {
+          ratingRDD = ratingRDD.union(ratings)
+          ratingRDD.persist(StorageLevel.DISK_ONLY)
+          ratingRDD.checkpoint()
+        }
+        i += 1
       }
-      if (ratingRDD == null) {
-        ratingRDD = ratings
-      } else {
-        ratingRDD = ratingRDD.union(ratings)
-      }        
     }
-    ratingRDD.persist
+    ratingRDD.persist(StorageLevel.DISK_ONLY)
+    ratingRDD.checkpoint()
     ratingRDD
   }
 
