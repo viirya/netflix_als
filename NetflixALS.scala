@@ -97,7 +97,9 @@ object NetflixALS {
       val movieId = kv._1
 
       if (numRatings == None || i < numRatings.get) {
-        val ratings = sc.textFile(f"$dir/mv_$movieId%07d.txt").flatMap[(Long, Rating)] { line =>
+        val ratings = sc.textFile(f"$dir/mv_$movieId%07d.txt").coalesce(sc.defaultParallelism)
+          .flatMap[(Long, Rating)] { line =>
+
           val fields = line.split(",")
           if (fields.size == 3) { 
             // format: (date, Rating(userId, movieId, rating))
