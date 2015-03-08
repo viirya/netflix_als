@@ -56,9 +56,9 @@ object NetflixALS {
 
     // train models and evaluate them on the validation set
 
-    val ranks = List(8, 12)
-    val lambdas = List(0.1, 10.0)
-    val numIters = List(20, 50, 100)
+    val ranks = List(8, 12, 50, 100)
+    val lambdas = List(0.1, 1, 1.5, 10.0)
+    val numIters = List(20, 25)
     var bestModel: Option[MatrixFactorizationModel] = None
     var bestValidationRmse = Double.MaxValue
     var bestRank = 0
