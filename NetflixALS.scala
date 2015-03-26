@@ -24,7 +24,7 @@ object NetflixALS {
     Logger.getLogger("org.eclipse.jetty.server").setLevel(Level.OFF)	
 
     if (args.length < 2) {
-      println("Usage: NetflixALS \"datasetHomeDir\" \"path to movie_title.txt\" \"<number of ratings>\"")
+      println("Usage: NetflixALS \"datasetHomeDir\" \"path to movie_title.txt\" \"path to probe.txt\" \"<number of ratings>\"")
       exit(1)
     }
 
@@ -38,11 +38,13 @@ object NetflixALS {
 
     val datasetHomeDir = args(0)
     val movieTitleFile = args(1)
-    val numRatings = if (args.length == 3) Some(args(2).toInt) else None
+    val probeFile = args(2)
+    val numRatings = if (args.length == 4) Some(args(3).toInt) else None
 
     val movies = readAndParseMovieTitles(movieTitleFile)
+    val probeSet = sc.parallelize(readAndParseProbeSet(probeFile))
     val ratings = loadNetflixRatings(datasetHomeDir, movies, sc, numRatings)
-    val (training, validation) = getTrainingRatings(ratings)
+    val (training, validation) = getAllTrainingRatings(ratings, probeSet)
     train(training, validation)
 
     sc.stop();
@@ -78,7 +80,18 @@ object NetflixALS {
       }
     }
   }
+ 
+  def getAllTrainingRatings(ratings: RDD[(Long, Rating)], probeSet: RDD[Rating]):
+    (RDD[Rating], RDD[Rating]) = {
 
+    val training = ratings.values.persist(StorageLevel.DISK_ONLY)
+    training.checkpoint()
+    val validation = training.map(x => ((x.user, x.product), x.rating))
+                             .join(probeSet.map(x => ((x.user, x.product), x.rating)))
+                             .map(x => Rating(x._1._1, x._1._2, x._2._1))
+    (training, validation)
+  }
+ 
   def getTrainingRatings(ratings: RDD[(Long, Rating)]):
     (RDD[Rating], RDD[Rating]) = {
 
@@ -143,7 +156,20 @@ object NetflixALS {
     }
     lines
   } 
-
+ 
+  def readAndParseProbeSet(path: String): Seq[Rating] = {
+    var movieId: Int = -1
+    readFile(path).flatMap[Rating, Seq[Rating]] { (line) =>
+      if (line.indexOf(":") >= 0) {
+        val fields = line.split(":")
+        movieId = fields(0).toInt
+        Seq()
+      } else {
+        Seq(Rating(line.toInt, movieId, 0.0d))
+      }
+    }
+  }
+ 
   def readAndParseMovieTitles(path: String): Map[Int, String] = {
     readFile(path).map { (line) =>
       val fields = line.split(",")
