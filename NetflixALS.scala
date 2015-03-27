@@ -84,11 +84,22 @@ object NetflixALS {
   def getAllTrainingRatings(ratings: RDD[(Long, Rating)], probeSet: RDD[Rating]):
     (RDD[Rating], RDD[Rating]) = {
 
-    val training = ratings.values.persist(StorageLevel.DISK_ONLY)
+    // filter out the rating in probe set
+    val training = ratings.values.map(x => ((x.user, x.product), x.rating))
+                                 .leftOuterJoin(probeSet.map(x => ((x.user, x.product), x.rating)))
+                                 .flatMap {
+                                    case ((user, product), (rating, Some(_))) =>
+                                      Seq[Rating]()
+                                    case ((user, product), (rating, None)) =>
+                                      Seq(Rating(user, product, rating))
+                                 }.persist(StorageLevel.DISK_ONLY)
     training.checkpoint()
-    val validation = training.map(x => ((x.user, x.product), x.rating))
-                             .join(probeSet.map(x => ((x.user, x.product), x.rating)))
-                             .map(x => Rating(x._1._1, x._1._2, x._2._1))
+
+    val validation = ratings.values.map(x => ((x.user, x.product), x.rating))
+                                   .join(probeSet.map(x => ((x.user, x.product), x.rating)))
+                                   .map(x => Rating(x._1._1, x._1._2, x._2._1)).persist(StorageLevel.DISK_ONLY)
+    validation.checkpoint()
+
     (training, validation)
   }
  
