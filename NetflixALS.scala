@@ -81,23 +81,70 @@ object NetflixALS {
     }
   }
  
-  def getAllTrainingRatings(ratings: RDD[(Long, Rating)], probeSet: RDD[Rating]):
+  def getAllTrainingRatings(ratings: RDD[(Long, Rating)], probeSet: RDD[Rating], partOfRating: Boolean = true):
     (RDD[Rating], RDD[Rating]) = {
 
     // filter out the rating in probe set
-    val training = ratings.values.map(x => ((x.user, x.product), x.rating))
-                                 .leftOuterJoin(probeSet.map(x => ((x.user, x.product), x.rating)))
-                                 .flatMap {
-                                    case ((user, product), (rating, Some(_))) =>
-                                      Seq[Rating]()
-                                    case ((user, product), (rating, None)) =>
-                                      Seq(Rating(user, product, rating))
-                                 }.persist(StorageLevel.DISK_ONLY)
-    training.checkpoint()
+    val (training, validation) = if (partOfRating) {
+      val joinRDD = ratings.values.map(x => (x.user, (x.product, x.rating)))
+                    .groupByKey()
+                    .leftOuterJoin(probeSet.map(x => (x.user, (x.product, x.rating))).groupByKey())
+      val training: RDD[Rating] = joinRDD.flatMap {
+                       case (user, (productRatings, Some(probeProductRatings))) =>
+                         if (productRatings.size - probeProductRatings.size > 0) {
+                           val lookingMap = probeProductRatings.dropRight(1).map(pr => (pr._1, pr._2)).toMap
+                           val ret = productRatings.flatMap { pr =>
+                             if (lookingMap.isDefinedAt(pr._1)) {
+                               Seq[Rating]()
+                             } else {
+                               Seq(Rating(user, pr._1, pr._2))
+                             }
+                           }.toSeq
+                           ret
+                         } else {
+                           productRatings.map(pr => Rating(user, pr._1, pr._2)).toSeq
+                         }
+                       case (user, (productRatings, None)) =>
+                         productRatings.map(pr => Rating(user, pr._1, pr._2)).toSeq
+                     }.persist(StorageLevel.DISK_ONLY)
 
-    val validation = ratings.values.map(x => ((x.user, x.product), x.rating))
+      val validation: RDD[Rating] = joinRDD.flatMap {
+                       case (user, (productRatings, Some(probeProductRatings))) =>
+                         if (productRatings.size - probeProductRatings.size > 0) {
+                           val lookingMap = probeProductRatings.dropRight(1).map(pr => (pr._1, pr._2)).toMap
+                           val ret = productRatings.flatMap { pr =>
+                             if (lookingMap.isDefinedAt(pr._1)) {
+                               Seq(Rating(user, pr._1, pr._2))
+                             } else {
+                               Seq[Rating]()
+                             }
+                           }.toSeq
+                           ret
+                         } else {
+                           Seq[Rating]()
+                         }
+                       case (user, (productRatings, None)) =>
+                         Seq[Rating]()
+                     }.persist(StorageLevel.DISK_ONLY)
+
+      (training, validation)
+    } else {
+      val training: RDD[Rating] = ratings.values.map(x => ((x.user, x.product), x.rating))
+                                   .leftOuterJoin(probeSet.map(x => ((x.user, x.product), x.rating)))
+                                   .flatMap {
+                                      case ((user, product), (rating, Some(_))) =>
+                                        Seq[Rating]()
+                                      case ((user, product), (rating, None)) =>
+                                        Seq(Rating(user, product, rating))
+                                   }.persist(StorageLevel.DISK_ONLY)
+
+      val validation: RDD[Rating] = ratings.values.map(x => ((x.user, x.product), x.rating))
                                    .join(probeSet.map(x => ((x.user, x.product), x.rating)))
                                    .map(x => Rating(x._1._1, x._1._2, x._2._1)).persist(StorageLevel.DISK_ONLY)
+      (training, validation)
+    }
+
+    training.checkpoint()
     validation.checkpoint()
 
     (training, validation)
